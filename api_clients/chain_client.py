@@ -176,11 +176,11 @@ class ChainClient:
         
         return await self._make_request("POST", "", params)
     
-    async def get_contract_events(self, contract_address: str, event_signature: str, 
+    async def get_contract_events(self, contract_address: str, event_signature: str,
                                 from_block: str = "0x0", to_block: str = "latest") -> List[Dict]:
         """
         Get events from a specific contract.
-        
+
         :param contract_address: Address of the contract
         :param event_signature: Signature of the event to query
         :param from_block: Starting block (default: 0x0)
@@ -197,5 +197,88 @@ class ChainClient:
                 "topics": [event_signature]
             }]
         }
-        
+
         return await self._make_request("POST", "", params)
+
+    async def execute_via_proxy(self, proxy_address: str, target_contract: str,
+                              function_name: str, params: Dict) -> Dict:
+        """
+        Execute a transaction via a proxy contract to minimize gas costs.
+
+        :param proxy_address: Address of the proxy contract
+        :param target_contract: Target contract identifier
+        :param function_name: Function to call on the target contract
+        :param params: Parameters for the function call
+        """
+        try:
+            # Construct the transaction data for the proxy call
+            transaction_data = {
+                "from": self.settings.WALLET_ADDRESS,
+                "to": proxy_address,
+                "data": self._construct_proxy_call_data(target_contract, function_name, params),
+                "gas": "0x5208",  # 21000 gas (standard for simple transfers)
+                "gasPrice": await self._get_current_gas_price(),
+            }
+
+            # Estimate gas for the transaction
+            estimated_gas = await self.estimate_gas(transaction_data)
+            transaction_data["gas"] = hex(int(estimated_gas.get("result", "0x5208"), 16) * 120 // 100)  # Add 20% buffer
+
+            # Send the transaction
+            result = await self.send_transaction(transaction_data)
+
+            return {
+                "success": True,
+                "transaction_hash": result.get("result"),
+                "proxy_address": proxy_address,
+                "target_contract": target_contract,
+                "function_called": function_name
+            }
+
+        except Exception as e:
+            logger.error(f"Error executing transaction via proxy: {str(e)}")
+            return {
+                "success": False,
+                "message": str(e),
+                "proxy_address": proxy_address,
+                "target_contract": target_contract,
+                "function_called": function_name
+            }
+
+    def _construct_proxy_call_data(self, target_contract: str, function_name: str, params: Dict) -> str:
+        """
+        Construct the calldata for a proxy contract call.
+
+        :param target_contract: Target contract identifier
+        :param function_name: Function to call on the target contract
+        :param params: Parameters for the function call
+        :return: Hex-encoded calldata string
+        """
+        # This is a simplified version - in practice, you'd use ABI encoding
+        # to properly encode the function signature and parameters
+        import hashlib
+
+        # Create function signature hash (first 4 bytes of keccak256 of function signature)
+        func_sig = f"{function_name}({','.join(['uint256'] * len(params))})"  # Simplified assumption
+        selector = hashlib.sha256(func_sig.encode()).hexdigest()[:8]
+
+        # Encode parameters (this is a simplified version)
+        encoded_params = ""
+        for param_value in params.values():
+            # Convert to hex with padding to 32 bytes
+            hex_param = hex(param_value if isinstance(param_value, int) else int(str(param_value))) if param_value else "0"
+            encoded_params += hex_param[2:].zfill(64)  # Pad to 32 bytes (64 hex chars)
+
+        return "0x" + selector + encoded_params
+
+    async def _get_current_gas_price(self) -> str:
+        """
+        Helper method to get current gas price.
+
+        :return: Gas price in hex format
+        """
+        try:
+            gas_price_response = await self.get_gas_price()
+            return gas_price_response.get("result", "0x12a05f200")  # Default to ~5 gwei if not available
+        except:
+            return "0x12a05f200"  # Default to ~5 gwei

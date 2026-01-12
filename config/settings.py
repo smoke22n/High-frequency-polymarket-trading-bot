@@ -28,6 +28,11 @@ class Settings:
     WEBSOCKET_RECONNECT_DELAY = int(os.getenv("WEBSOCKET_RECONNECT_DELAY", 5))  # seconds
     WEBSOCKET_HEARTBEAT_INTERVAL = int(os.getenv("WEBSOCKET_HEARTBEAT_INTERVAL", 30))  # seconds
     
+    # CTF and Hedging Configuration
+    CTF_ADDRESS = os.getenv("CTF_ADDRESS", "0x2cbecae5e324f0d1d524721b9d9a7be377e494d5")  # Gnosis ConditionalTokens contract address
+    COLLATERAL_TOKEN_ADDRESS = os.getenv("COLLATERAL_TOKEN_ADDRESS", "0x2791bca1f2de4661ed88a30c99a7a9449aa84174")  # USDC on Polygon
+    POSITION_PROXY_ADDRESS = os.getenv("POSITION_PROXY_ADDRESS", "0x0000000000000000000000000000000000000000")  # Default to zero address if not set
+
     # Validation
     def validate(self):
         required_fields = [
@@ -35,11 +40,11 @@ class Settings:
             "PRIVATE_KEY",
             "WALLET_ADDRESS"
         ]
-        
+
         missing_fields = []
         for field in required_fields:
             if getattr(self, field) is None:
                 missing_fields.append(field)
-        
+
         if missing_fields:
             raise ValueError(f"Missing required environment variables: {', '.join(missing_fields)}")
