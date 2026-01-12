@@ -125,65 +125,123 @@ class MarketDataIngestor:
     Market data ingestion engine that maintains a real-time mirror of the order book.
     """
 
-    def __init__(self, market_token_id: str, websocket_url: str = None):
+    def __init__(self, market_token_id: str, connection_manager=None, settings=None):
         self.market_token_id = market_token_id
-        self.websocket_url = websocket_url or f"wss://polymarket.com/ws/{market_token_id}"
         self.order_book = OrderBook(market_token_id)
         self.delta_buffer = deque(maxlen=1000)  # Buffer up to 1000 deltas
         self.is_running = False
-        self.websocket = None
         self.metrics_callback = None
+        self.connection_manager = connection_manager
+        self.settings = settings
+        self._message_handler_registered = False
 
     async def connect(self):
-        """Connect to the WebSocket channel for the market."""
-        try:
-            self.websocket = await websockets.connect(self.websocket_url)
-            self.is_running = True
-            print(f"Connected to WebSocket for market: {self.market_token_id}")
+        """Connect to the WebSocket channel for the market using ConnectionManager."""
+        if not self.connection_manager:
+            # If no connection manager provided, create one
+            from connection.connection_manager import ConnectionManager
+            from config.settings import Settings
 
-            # Send subscription message
-            subscribe_msg = {
-                "type": "subscribe",
-                "channel": "orderbook",
-                "market_token_id": self.market_token_id
-            }
-            await self.websocket.send(json.dumps(subscribe_msg))
+            if not self.settings:
+                self.settings = Settings()
 
-        except Exception as e:
-            print(f"Failed to connect to WebSocket: {e}")
-            raise
+            ws_url = f"wss://clob.polymarket.com/ws"
+            self.connection_manager = ConnectionManager(ws_url, self.settings)
+
+        # Register message handler for orderbook updates
+        self.connection_manager.register_handler("orderbook_update", self._handle_orderbook_update)
+        self.connection_manager.register_handler("l2_data", self._handle_l2_data)
+        self._message_handler_registered = True
+
+        # Subscribe to orderbook updates for the specific market
+        subscribe_msg = {
+            "type": "subscribe",
+            "channel": "l2_book",
+            "market_token_id": self.market_token_id
+        }
+
+        await self.connection_manager.send_message(subscribe_msg)
+        self.is_running = True
+        print(f"Connected to WebSocket for market: {self.market_token_id}")
 
     async def disconnect(self):
         """Disconnect from the WebSocket."""
         self.is_running = False
-        if self.websocket:
-            await self.websocket.close()
+        if self.connection_manager and self._message_handler_registered:
+            # Unsubscribe from orderbook updates
+            unsubscribe_msg = {
+                "type": "unsubscribe",
+                "channel": "l2_book",
+                "market_token_id": self.market_token_id
+            }
+            await self.connection_manager.send_message(unsubscribe_msg)
         print("Disconnected from WebSocket")
+
+    async def _handle_orderbook_update(self, data: Dict):
+        """Handle orderbook update messages."""
+        try:
+            # Extract market ID and deltas from the message
+            market_id = data.get('market_id', self.market_token_id)
+            if market_id != self.market_token_id:
+                return  # Not for this market
+
+            delta = data.get('data', {})
+            if delta:
+                self.buffer_delta(delta)
+                # Apply delta immediately to maintain real-time sync
+                self.apply_deltas([delta])
+        except Exception as e:
+            print(f"Error handling orderbook update: {e}")
+
+    async def _handle_l2_data(self, data: Dict):
+        """Handle L2 book data messages."""
+        try:
+            # Process L2 book data (price, size, order count)
+            market_id = data.get('market_id', self.market_token_id)
+            if market_id != self.market_token_id:
+                return  # Not for this market
+
+            l2_updates = data.get('l2_updates', [])
+            for update in l2_updates:
+                # Convert L2 data to our delta format
+                delta = self._convert_l2_to_delta(update)
+                if delta:
+                    self.buffer_delta(delta)
+                    self.apply_deltas([delta])
+        except Exception as e:
+            print(f"Error handling L2 data: {e}")
+
+    def _convert_l2_to_delta(self, l2_data: Dict) -> Dict:
+        """Convert L2 data format to our internal delta format."""
+        bids = []
+        asks = []
+
+        # Process bids
+        if 'bids' in l2_data:
+            for bid in l2_data['bids']:
+                bids.append({
+                    'price': str(bid['price']),
+                    'quantity': str(bid['size']),
+                    'action': 'update'
+                })
+
+        # Process asks
+        if 'asks' in l2_data:
+            for ask in l2_data['asks']:
+                asks.append({
+                    'price': str(ask['price']),
+                    'quantity': str(ask['size']),
+                    'action': 'update'
+                })
+
+        return {'bids': bids, 'asks': asks} if bids or asks else {}
 
     async def consume_data(self):
         """Consume incoming WebSocket data and buffer deltas."""
-        try:
-            async for message in self.websocket:
-                try:
-                    data = json.loads(message)
-
-                    # Check if this is a delta update
-                    if data.get('type') == 'orderbook_update':
-                        delta = data.get('data', {})
-                        self.buffer_delta(delta)
-
-                        # Apply delta immediately to maintain real-time sync
-                        self.apply_deltas([delta])
-
-                except json.JSONDecodeError:
-                    print(f"Received non-JSON message: {message[:100]}...")
-                except Exception as e:
-                    print(f"Error processing message: {e}")
-
-        except websockets.exceptions.ConnectionClosed:
-            print("WebSocket connection closed")
-        except Exception as e:
-            print(f"Error in consume_data: {e}")
+        # This method is now handled by the connection manager's message handlers
+        # Just keep the loop running while the connection is active
+        while self.is_running:
+            await asyncio.sleep(0.1)  # Small sleep to prevent busy waiting
 
     def buffer_delta(self, delta: Dict[str, Any]):
         """Buffer incoming delta updates."""
